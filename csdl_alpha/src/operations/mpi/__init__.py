@@ -1,2 +1,2 @@
 from .mpi_region import enter_mpi_region
-from .operatives import mpi_sum, index_splitter
+from .operatives import mpi_sum, index_splitter, mpi_allreduce

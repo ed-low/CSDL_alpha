@@ -4,16 +4,19 @@ from csdl_alpha.src.graph.variable import Variable
 from csdl_alpha.utils.inputs import variablize, validate_and_variablize
 import csdl_alpha.utils.testing_utils as csdl_tests
 from csdl_alpha.utils.typing import VariableLike
+from typing import Literal
+from mpi4py import MPI
 
 from csdl_alpha.src.operations.custom.custom import CustomExplicitOperation
 import numpy as np
 
 class CustomAllReduce(CustomExplicitOperation):
-    def __init__(self, comm):
+    def __init__(self, vjp_mode:Literal["passthrough", "allreduce"], comm):
         super().__init__()
         self.comm = comm
         self.rank = self.comm.Get_rank()
         self.size = self.comm.Get_size()
+        self.vjp_mode = vjp_mode
 
     def evaluate(self, var):
         self.declare_input('in_var', var)
@@ -26,10 +29,29 @@ class CustomAllReduce(CustomExplicitOperation):
 
     def compute_jacvec_product(self, input_vals, outputs_vals, d_inputs, d_outputs, mode):
         from mpi4py import MPI
-        raise NotImplementedError("CustomAllReduce does not support reverse mode as of right now.")
+        if mode == 'fwd':
+            # y = allreduce(x), so dy = allreduce(dx)
+            if 'in_var' in d_inputs and d_inputs['in_var'] is not None:
+                d_outputs['out_var'] += self.comm.allreduce(d_inputs['in_var'], op=MPI.SUM)
+
+        elif mode == 'rev':
+            if self.vjp_mode == "passthrough":
+                # y = sum_r x_r, so (∂y/∂x_r)^T λ_y = λ_y on each rank
+                if 'out_var' in d_outputs and d_outputs['out_var'] is not None:
+                    d_inputs['in_var'] += d_outputs['out_var']
+
+            elif self.vjp_mode == "allreduce":
+                d_inputs['in_var'] += self.comm.allreduce(d_outputs['out_var'], op=MPI.SUM)
+
+        else:
+            raise ValueError(f"Unsupported mode '{mode}'. Use 'fwd' or 'rev'.")
     
 def mpi_sum(var, comm):
-    sum = CustomAllReduce(comm).evaluate(var)
+    sum = CustomAllReduce(vjp_mode="passthrough", comm=comm).evaluate(var)
+    return sum
+
+def mpi_allreduce(var, comm):
+    sum = CustomAllReduce(vjp_mode="allreduce", comm=comm).evaluate(var)
     return sum
 
 class CustomMPIIndex(CustomExplicitOperation):
